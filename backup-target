@@ -1,0 +1,58 @@
+#!/usr/bin/env perl
+
+use strict;
+use warnings;
+
+use IO::File;
+use Symbol 'gensym';
+use IPC::Cmd qw/run/;
+
+
+our $DEFAULT_CONFIG_FILE = '/etc/bareos/usbhdd-backup-targets.conf';
+
+
+sub read_config {
+    my $config_file = shift;
+    my $io = IO::File->new($config_file, 'r')
+        or die "Could not open $config_file for reading";
+
+    my %backup_targets;
+
+    while (<$io>) {
+        next unless /^\s*([a-zA-Z]+)\s+([A-Za-z0-9-]+)/;
+        my ($level, $uuid) = ($1, $2);
+
+        $backup_targets{$level} ||= [];
+        push $backup_targets{$level}, $uuid;
+    }
+
+    return %backup_targets;
+}
+
+
+sub get_dev {
+    my $blkids = shift;
+
+    my ($success, $error_message, $full_buf, $stdout, $stderr) =
+        run( command => 'blkid', verbose => 0);
+    die "Cannot run blkid: $stderr" unless $success;
+
+    foreach (@$stdout) {
+        foreach (split /\n/) {
+            next unless /(\/dev\/[^:]*):.*?UUID="([^"]*)"/;
+            my @devs = grep { $2 eq $_ } @$blkids;
+            return $1 if @devs;
+        }
+    }
+
+    return undef;
+}
+
+
+my $level = $ARGV[0] or die "Please give a backup level (e.g., 'full')";
+my %backup_targets = read_config($ENV{CONFIG_FILE} || $DEFAULT_CONFIG_FILE);
+my $dev = get_dev $backup_targets{$level} or die "No device for $level present";
+
+print "$level -rw :$dev\n";
+
+
