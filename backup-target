@@ -23,7 +23,7 @@ sub read_config {
         my ($level, $uuid) = ($1, $2);
 
         $backup_targets{$level} ||= [];
-        push $backup_targets{$level}, $uuid;
+        push @{$backup_targets{$level}}, $uuid;
     }
 
     return %backup_targets;
@@ -53,6 +53,6 @@ my $level = $ARGV[0] or die "Please give a backup level (e.g., 'full')";
 my %backup_targets = read_config($ENV{CONFIG_FILE} || $DEFAULT_CONFIG_FILE);
 my $dev = get_dev $backup_targets{$level} or die "No device for $level present";
 
-print "$level -rw :$dev\n";
+print "-fstype=auto,rw :$dev\n";
 
 
