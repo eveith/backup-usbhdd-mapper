@@ -1,0 +1,106 @@
+#!/usr/bin/env perl
+
+use strict;
+use warnings;
+
+use IO::File;
+use Symbol 'gensym';
+use IPC::Cmd qw/run/;
+use File::Temp qw/tempdir/;
+
+
+our $DEFAULT_CONFIG_FILE = '/etc/bareos/usbhdd-backup-targets.conf';
+
+
+sub read_config {
+    my $config_file = shift;
+    my $io = IO::File->new($config_file, 'r')
+        or die "Could not open $config_file for reading";
+
+    my %backup_targets;
+
+    while (<$io>) {
+        next unless /^\s*([a-zA-Z]+)\s+([A-Za-z0-9-]+)/;
+        my ($level, $uuid) = ($1, $2);
+
+        $backup_targets{$level} ||= [];
+        push @{$backup_targets{$level}}, $uuid;
+    }
+
+    return %backup_targets;
+}
+
+
+sub get_available_devices {
+    my ($success, $error_message, $full_buf, $stdout, $stderr) =
+        run(command => 'blkid');
+    die "Cannot run blkid: ".$stderr->[0] unless $success;
+    return map { 
+        m/(\/dev\/[^:]*):.*?UUID="([^"]*)"/ ? $2 : ()
+    } split(/\n/, $stdout->[0]);
+}
+
+
+sub get_free_space {
+    my @blkids = @_;
+    my $tmpdir = tempdir(CLEANUP => 1);
+    foreach (@blkids) {
+        mkdir "${tmpdir}/$_";
+        my ($success, $error_message, $full_buf, $stdout, $stderr) =
+            run(command => ['mount', "/dev/disk/by-uuid/$_", "${tmpdir}/$_"]);
+        die "Could not mount drive with UUID \"$_\": $stderr" unless $success;
+    }
+
+    local %ENV;
+    $ENV{'LC_NUMBERS'} = 'C';
+    my ($success, $error_message, $full_buf, $stdout, $stderr) = run(
+        command => 'df');
+    
+    foreach (@blkids) {
+        my ($success, $error_message, $full_buf, $stdout, $stderr) =
+            run(command => ['umount', "${tmpdir}/$_"]);
+        die "Could not unmount drive with UUID \"$_\": $stderr" unless $success;
+    }
+    return map {
+        my $b = $_;
+        my @l = grep(/$b/, split(/\n/, $stdout->[0]));
+        my @s = split /\s+/, $l[0];
+        $b => $s[3];
+    } @blkids;
+}
+
+
+sub get_dev {
+    my $blkids = shift;
+
+    my ($success, $error_message, $full_buf, $stdout, $stderr) =
+        run(command => 'blkid', verbose => 0);
+    die "Cannot run blkid: ".$stderr->[0] unless $success;
+
+    foreach (@$stdout) {
+        foreach (split /\n/) {
+            next unless /(\/dev\/[^:]*):.*?UUID="([^"]*)"/;
+            my @devs = grep { $2 eq $_ } @$blkids;
+            return $1 if @devs;
+        }
+    }
+
+    return undef;
+}
+
+
+my $level = $ARGV[0] or die "Please give a backup level (e.g., 'full')";
+my @all_available_devices = get_available_devices;
+my %backup_targets = read_config($ENV{CONFIG_FILE} || $DEFAULT_CONFIG_FILE);
+my @available_backup_devices = grep { 
+    my $f = lc $_;
+    grep lc $_ eq $f, @all_available_devices
+} @{$backup_targets{$level}};
+my %backup_targets_free_space = get_free_space @available_backup_devices;
+my $preferred_target = (sort {
+    $backup_targets_free_space{$a} <=> $backup_targets_free_space{$b}
+} keys %backup_targets_free_space)[0];
+my $devpath = "/dev/disk/by-uuid/$preferred_target";
+#my $dev = get_dev $backup_targets{$level} or die "No device for $level present";
+
+print "-fstype=auto,rw :$devpath\n";
